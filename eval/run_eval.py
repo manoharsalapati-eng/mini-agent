@@ -171,12 +171,18 @@ def main() -> None:
     (ROOT / "results.json").write_text(payload)
     print("\n" + write_report(results, meta, ROOT / "results.md"))
     # Keep one file per model so several models can be compared side by side.
-    if not a.only:
+    if not a.only and not any(r["crash"] for r in results):
         RESULTS_DIR.mkdir(exist_ok=True)
         slug = "".join(c if c.isalnum() or c in "-." else "_" for c in meta["model"])
         (RESULTS_DIR / f"{slug}.json").write_text(payload)
         write_report(results, meta, RESULTS_DIR / f"{slug}.md")
         print(write_summary(RESULTS_DIR))
+    crashes = [r for r in results if r["crash"]]
+    if crashes:
+        print(f"\n{len(crashes)} run(s) crashed — these are harness/API errors, not model failures:")
+        for r in crashes:
+            print(f"  {r['bug']}: {r['crash']}")
+        sys.exit(2)
 
 
 if __name__ == "__main__":

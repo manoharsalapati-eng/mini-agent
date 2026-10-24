@@ -34,6 +34,10 @@ concurrency:
   group: eval
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash  # bash -eo pipefail: a failing command in a pipeline fails the step
+
 jobs:
   eval:
     runs-on: ubuntu-latest
@@ -75,12 +79,30 @@ jobs:
           fi
           echo "EVAL_ARGS=${args[*]@Q}" >> "$GITHUB_ENV"
 
-      - name: List available GitHub Models
+      - name: Check GitHub Models access
         if: inputs.provider == 'github'
-        continue-on-error: true
         run: |
-          curl -sf https://models.github.ai/catalog/models -H "Authorization: Bearer $GITHUB_TOKEN" \
-            | python -c "import sys, json; [print(m['id'], '|', m.get('rate_limit_tier'), '|', ','.join(m.get('capabilities', []))) for m in json.load(sys.stdin)]"
+          gh_curl() {
+            curl -sS -L -m 60 -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" "$@"
+          }
+          echo "::group::catalog"
+          gh_curl -D /tmp/h1 -o /tmp/catalog.json https://models.github.ai/catalog/models || true
+          grep -iE "^(HTTP|location|content-type|content-length|x-ratelimit)" /tmp/h1 || true
+          python - <<'PY' || head -c 400 /tmp/catalog.json
+          import json
+          for m in json.load(open("/tmp/catalog.json")):
+              print(m["id"], "|", m.get("rate_limit_tier"), "|", ",".join(m.get("capabilities", [])))
+          PY
+          echo "::endgroup::"
+          model="${MODEL:-openai/gpt-4.1-mini}"
+          echo "::group::chat completion with $model"
+          gh_curl -D /tmp/h2 -o /tmp/chat.json -X POST -H "Content-Type: application/json" \
+            https://models.github.ai/inference/chat/completions \
+            -d "{\"model\": \"$model\", \"messages\": [{\"role\": \"user\", \"content\": \"Reply with OK\"}]}" || true
+          grep -iE "^(HTTP|location|content-type|content-length|x-ratelimit)" /tmp/h2 || true
+          head -c 600 /tmp/chat.json; echo
+          echo "::endgroup::"
 
       - name: Run eval
         run: |

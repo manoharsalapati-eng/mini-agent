@@ -40,7 +40,12 @@ def _post(url: str, headers: dict, body: dict, retries: int = 5) -> dict:
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=120) as r:
-                return json.loads(r.read())
+                raw = r.read()
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError:
+                    raise RuntimeError(f"Non-JSON response from {r.geturl()} (HTTP {r.status}): "
+                                       f"{raw[:200].decode(errors='replace')!r}") from None
         except urllib.error.HTTPError as e:
             msg = e.read().decode(errors="replace")[:500]
             if e.code in (429, 500, 502, 503, 529) and attempt < retries:
@@ -163,7 +168,8 @@ class OpenAICompatClient:
         body = {"model": self.model, "messages": self._convert(system, messages)}
         if tools:  # several OpenAI-compatible APIs reject an empty tools list
             body["tools"] = [{"type": "function", "function": t} for t in tools]
-        headers = {"Authorization": f"Bearer {self.api_key}", "content-type": "application/json"}
+        headers = {"Authorization": f"Bearer {self.api_key}", "content-type": "application/json",
+                   "accept": "application/json"}
         d = _post(f"{self.base_url}/chat/completions", headers, body)
         msg = d["choices"][0]["message"]
         usage = d.get("usage") or {}
