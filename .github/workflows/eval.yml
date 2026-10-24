@@ -1,8 +1,8 @@
 # Runs the 5-bug eval against a real model and commits the results to eval/results/.
 #
-#   provider=github     free GitHub Models, authenticated with the workflow's own token (no secret needed)
 #   provider=anthropic  needs repo secret ANTHROPIC_API_KEY
-#   provider=openai     needs repo secrets OPENAI_API_KEY and OPENAI_BASE_URL
+#   provider=openai     needs repo secrets OPENAI_API_KEY and OPENAI_BASE_URL (Groq, Gemini, OpenRouter, ...)
+#   provider=github     GitHub Models with the workflow's own token, where your account has access to it
 #
 # Actions -> eval -> Run workflow.
 name: eval
@@ -13,8 +13,8 @@ on:
       provider:
         description: "Model provider"
         type: choice
-        options: [github, anthropic, openai]
-        default: github
+        options: [anthropic, openai, github]
+        default: anthropic
       model:
         description: "Model name (blank = openai/gpt-4.1-mini on GitHub Models, claude-opus-5-5 on Anthropic)"
         default: ""
@@ -79,37 +79,22 @@ jobs:
           fi
           echo "EVAL_ARGS=${args[*]@Q}" >> "$GITHUB_ENV"
 
-      - name: Check GitHub Models access
-        if: inputs.provider == 'github'
+      - name: Check provider access
         run: |
-          gh_curl() {
-            curl -sS -L -m 60 -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" "$@"
-          }
-          echo "::group::catalog"
-          gh_curl -D /tmp/h1 -o /tmp/catalog.json https://models.github.ai/catalog/models || true
-          grep -iE "^(HTTP|location|content-type|content-length|x-ratelimit)" /tmp/h1 || true
-          python - <<'PY' || head -c 400 /tmp/catalog.json
-          import json
-          for m in json.load(open("/tmp/catalog.json")):
-              print(m["id"], "|", m.get("rate_limit_tier"), "|", ",".join(m.get("capabilities", [])))
-          PY
-          echo "::endgroup::"
-          model="${MODEL:-openai/gpt-4.1-mini}"
-          echo "::group::chat completion with $model"
-          gh_curl -D /tmp/h2 -o /tmp/chat.json -X POST -H "Content-Type: application/json" \
-            https://models.github.ai/inference/chat/completions \
-            -d "{\"model\": \"$model\", \"messages\": [{\"role\": \"user\", \"content\": \"Reply with OK\"}]}" || true
-          grep -iE "^(HTTP|location|content-type|content-length|x-ratelimit)" /tmp/h2 || true
-          head -c 600 /tmp/chat.json; echo
-          echo "::endgroup::"
-          echo "::group::legacy endpoint (models.inference.ai.azure.com)"
-          curl -sS -m 60 -D /tmp/h3 -o /tmp/chat2.json -X POST https://models.inference.ai.azure.com/chat/completions \
-            -H "Authorization: Bearer $GITHUB_TOKEN" -H "Content-Type: application/json" \
-            -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "Reply with OK"}]}' || true
-          grep -iE "^(HTTP|location|content-type|x-ratelimit)" /tmp/h3 || true
-          head -c 600 /tmp/chat2.json; echo
-          echo "::endgroup::"
+          case "$PROVIDER" in
+            anthropic)
+              [ -n "$ANTHROPIC_API_KEY" ] || { echo "::error::Add a repository secret named ANTHROPIC_API_KEY (Settings > Secrets and variables > Actions)"; exit 1; } ;;
+            openai)
+              [ -n "$OPENAI_API_KEY" ] || { echo "::error::Add repository secrets OPENAI_API_KEY and OPENAI_BASE_URL"; exit 1; } ;;
+            github)
+              body=$(curl -sS -m 60 -X POST https://models.github.ai/inference/chat/completions \
+                -H "Authorization: Bearer $GITHUB_TOKEN" -H "Content-Type: application/json" \
+                -d '{"model": "openai/gpt-4.1-mini", "messages": [{"role": "user", "content": "Reply with OK"}]}' || true)
+              python -c 'import json, sys; json.loads(sys.argv[1])' "$body" 2>/dev/null || {
+                echo "::error::GitHub Models did not return JSON (got: ${body:0:80}). It may not be available to this repository; use provider=anthropic with an ANTHROPIC_API_KEY secret."
+                exit 1
+              } ;;
+          esac
 
       - name: Run eval
         run: |

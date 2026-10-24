@@ -1,7 +1,9 @@
 # 60–90 second demo video script
 
+A ready-made silent 60 s video is already in [`docs/demo.mp4`](demo.mp4) (rendered by `scripts/make_demo_video.py`). Use this script if you also want a narrated recording with a real model.
+
 Record with Loom, OBS or your OS screen recorder. Terminal font ≥ 16 pt, dark theme, window ~100 columns.
-Put the link at the top of the README (replace the placeholder on the 🎥 line).
+Put the link on the 🎥 line at the top of the README.
 
 **Before recording:** `cp .env.example .env`, add your key, and do a dry run once so nothing surprises you.
 Reset the sample repo afterwards with `git checkout eval/sample_repo`.

@@ -1,6 +1,6 @@
 # LinkedIn post draft
 
-Edit the numbers and the "what surprised me" line after you run the eval; keep it in your own voice.
+Attach `docs/demo.mp4` as the post's video (native video gets more reach than a link). Fill in the eval line after the real-model run, or drop it until then; keep it in your own voice.
 
 ---
 

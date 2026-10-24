@@ -5,15 +5,17 @@
 ![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
-> 🎥 **Demo (60–90 s):** _add your Loom / screen-recording link here_ (script: [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md))
+> 🎥 **Demo (60 s):** [watch the video](docs/demo.mp4): the agent fixes a bug, guardrails block unsafe actions, and the test suite runs.
 
 A small coding agent (~600 lines of Python, **zero dependencies**) that can read, edit and run files inside one project folder. It's built to show what a *harness* is: the loop, tools, memory, permissions and limits that turn a language model into a working agent — the same idea behind Claude Code and Cursor, stripped to the parts you can read in an evening.
 
-**Eval:** fixes **_X_/5** seeded bugs in a sample repo with _MODEL_ (mean _N_ steps, _T_ tokens per bug) — see [Evaluation](#evaluation).
+**Eval:** 5 seeded bugs, scored strictly (tests must pass, test files untouched, no regressions); see [Evaluation](#evaluation). _Real-model results: run pending._
 
 **Try it in 10 seconds, no API key:** `python -m harness --demo` runs a scripted model through the real harness (sandbox, approvals, edits, tests, logging) and fixes a bug in a copy of the sample repo.
 
-![mini-agent fixing the cart-discount bug](docs/demo.png)
+![mini-agent: fixing a bug, guardrails, tests](docs/demo.gif)
+
+<sub>The demo uses a scripted model so it runs offline; every tool call, approval, edit and test run in it is real harness output. Regenerate with `python scripts/make_demo_video.py` (needs Pillow + ffmpeg), or pass `--transcript` to render a recorded real-model run.</sub>
 
 ## What it does
 
@@ -126,33 +128,32 @@ python eval/run_eval.py --only cart-discount --verbose
 python eval/run_eval.py --provider openai --model llama-3.3-70b-versatile   # compare models
 ```
 
-No local key? Add `ANTHROPIC_API_KEY` as a repository secret and run **Actions → eval → Run workflow**; the results table appears in the run summary and `results.md`/`results.json`/logs are uploaded as an artifact.
+No local key? Add `ANTHROPIC_API_KEY` as a repository secret and run **Actions → eval → Run workflow**. The results table appears in the run summary and is committed to `eval/results/` (one file per model plus `summary.md`); logs are uploaded as an artifact. Tick *record_demo* to also save a real run's transcript for `scripts/make_demo_video.py --transcript`. A run where the API call itself fails is reported as a crash and fails the workflow; it is never recorded as a 0/5 score.
 
 The offline tests include a **reference-fix check**: a scripted model applies a known-correct fix for each bug and the scorer counts 5/5. That proves every bug is fixable without touching tests and that the scorer works; it is not a model score.
 
 ### Results
 
-_paste `eval/results.md` here, e.g._
-
-| Model | Fixed | Mean steps | Mean tokens |
-|---|---|---|---|
-| _model A_ | _/5 | | |
-| _model B_ | _/5 | | |
+<!-- Paste eval/results/summary.md here after a run. -->
+_Pending a real-model run._ `python eval/run_eval.py` (or the eval workflow) writes the table to `eval/results/summary.md`: one row per model with bugs fixed, mean steps and mean tokens.
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v       # 27 offline tests, no API key needed
+python -m unittest discover -s tests -v       # 29 offline tests, no API key needed
 ```
 
-They cover the sandbox (including symlink escape), the blocklist, approvals, each tool, the loop and step limit, both memory stages (and that no tool call is orphaned after summarising), both API wire formats (including thinking-block replay and refusal handling), `.env` loading, the offline demo — and the eval scorer itself: reference fixes score 5/5, editing the tests or breaking another module does not count. CI runs them on Python 3.10–3.13 (Linux) and macOS.
+They cover the sandbox (including symlink escape), the blocklist, approvals, each tool, the loop and step limit, both memory stages (and that no tool call is orphaned after summarising), both API wire formats (including thinking-block replay and refusal handling), `.env` loading, rate-limit retries, the offline demo, the results table — and the eval scorer itself: reference fixes score 5/5, editing the tests or breaking another module does not count. CI runs them on Python 3.10–3.13 (Linux) and macOS.
 
 ## What I learned
 
-_Write this in your own words after running it. Prompts:_
-- _What did the agent get wrong first, and which harness change fixed it?_
-- _How much did model choice vs. harness design (prompt, tool descriptions, error messages) matter?_
-- _Where would this break on a real codebase?_
+- **The harness is most of the agent.** The model only sees what the tools return, so error messages are its feedback loop. "old_str appears 2 times, add surrounding lines" lets it fix its own mistake; a stack trace or a crashed loop doesn't. Exact-match edits (instead of line numbers) made wrong-place edits impossible rather than unlikely.
+- **An eval has to tell "the model failed" apart from "the harness failed".** My first CI eval run reported 0/5. Every run had actually crashed on an API response the client couldn't parse. Now a crash fails the run and is never recorded as a score, and the reason is printed.
+- **Scoring needs anti-cheating rules.** The easiest way to make a failing test pass is to edit the test. Hashing the test files and re-running the whole suite for regressions closes that loophole, and a reference-fix test proves the scorer itself works.
+- **Context management is about structure, not just size.** Trimming history must never separate a tool call from its result (APIs reject that), and some provider data, such as Anthropic thinking blocks, is only valid for the exact history that produced it. Free-tier endpoints with ~8k-token request limits needed a configurable memory budget.
+- **A blocklist is not a sandbox.** Regex filters stop `rm -rf` but not `python -c "shutil.rmtree(...)"`. Layering helps (blocklist before approval, symlink-resolved paths), but the real fix is running commands in a container.
+- **"OpenAI-compatible" is a spectrum.** Providers differ on details like rejecting an empty `tools` list or how rate limits are signalled, so the client honours `Retry-After` and omits empty fields.
+- _After a real-model run: what the agent got wrong first, and which harness change fixed it._
 
 ## Project layout
 
@@ -160,7 +161,8 @@ _Write this in your own words after running it. Prompts:_
 harness/          the agent (loop, tools, guardrails, memory, model clients, demo)
 eval/             5-bug benchmark: sample_repo/ + run_eval.py → results.md / results.json
 tests/            offline unit tests (ScriptedClient, no network)
-docs/             screenshot, demo-video script, LinkedIn post draft
+docs/             demo video (mp4 + gif), narration script, LinkedIn post draft
+scripts/          make_demo_video.py: renders the demo video from real harness output
 .github/workflows tests on every push; manual eval run with an API-key secret
 ```
 

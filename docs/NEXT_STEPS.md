@@ -1,11 +1,16 @@
-# What's left (needs your API key / your voice)
+# What's left
 
-1. **Run the eval.** `cp .env.example .env`, add `ANTHROPIC_API_KEY`, then `python eval/run_eval.py --trials 3`.
-   Or add the key as a GitHub secret and run **Actions → eval**. Optionally compare a second model
-   (`--provider openai` with Groq/Gemini) for a two-row table.
-2. **Fill the README.** The "Eval:" line near the top (X/5, model, mean steps, tokens) and the Results
-   table: paste `eval/results.md`. Commit `eval/results.md` and `eval/results.json`.
-3. **Record the demo video** with [DEMO_SCRIPT.md](DEMO_SCRIPT.md) and put the link on the 🎥 line.
-4. **Write "What I learned"** in your own words from what you saw in the eval logs (`eval/logs/`).
-5. **Post on LinkedIn**: [LINKEDIN_POST.md](LINKEDIN_POST.md).
-6. Repo settings: add a description, topics (`ai-agents`, `llm`, `python`, `coding-agent`) and pin it on your profile.
+Done: harness, tests and CI, offline demo, 60 s demo video (`docs/demo.mp4` / `demo.gif`), README, "What I learned" draft.
+
+1. **Real-model eval (needs an API key).** In the repo: Settings → Secrets and variables → Actions →
+   New repository secret `ANTHROPIC_API_KEY`. Then Actions → **eval** → Run workflow (tick *record_demo*).
+   Results are committed to `eval/results/`. A free alternative: a Groq or Gemini key as secrets
+   `OPENAI_API_KEY` + `OPENAI_BASE_URL`, then run with provider `openai` and a model name.
+   Rough cost with the default model: a few dollars per full run; set a spend limit on the key.
+2. **After the run:** replace "_Real-model results: run pending._" and the Results section in the README with
+   `eval/results/summary.md`, add the last "What I learned" bullet, and optionally re-render the video
+   from the real transcript: `python scripts/make_demo_video.py --transcript docs/demo_run.ansi`.
+3. **Read "What I learned"** in the README and make it yours; you'll be asked about it in interviews.
+4. **Optional narrated video** with [DEMO_SCRIPT.md](DEMO_SCRIPT.md).
+5. **Post on LinkedIn**: [LINKEDIN_POST.md](LINKEDIN_POST.md) (upload `docs/demo.mp4` with it).
+6. Repo page: add a description, topics (`ai-agents`, `llm`, `python`, `coding-agent`) and pin it on your profile.
