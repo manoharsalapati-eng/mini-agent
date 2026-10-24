@@ -2,9 +2,10 @@
 
 Internal (provider-neutral) message format used everywhere in the harness:
     {"role": "user", "content": "text"}
-    {"role": "assistant", "content": "text", "tool_calls": [{"id", "name", "args"}]}
+    {"role": "assistant", "content": "text", "tool_calls": [{"id", "name", "args"}], "raw": [...]}
     {"role": "tool", "results": [{"id", "name", "output", "is_error"}]}
-Each client converts this to its own wire format.
+Each client converts this to its own wire format. "raw" is optional: the provider's own content blocks,
+replayed unchanged so things like Anthropic thinking blocks survive the round trip.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -29,6 +31,7 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
+    raw: list | None = None  # provider content blocks to replay as-is (see module docstring)
 
 
 def _post(url: str, headers: dict, body: dict, retries: int = 4) -> dict:
@@ -52,13 +55,21 @@ def _post(url: str, headers: dict, body: dict, retries: int = 4) -> dict:
     raise RuntimeError("unreachable")
 
 
+# Models that accept the server-side `fallbacks` parameter on the Claude API.
+FALLBACK_MODELS = {"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
+
+
 class AnthropicClient:
-    def __init__(self, model: str, api_key: str | None = None, max_tokens: int = 4096):
+    URL = "https://api.anthropic.com/v1/messages"
+
+    def __init__(self, model: str, api_key: str | None = None, max_tokens: int = 16_000,
+                 effort: str | None = None):
         self.model = model
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not self.api_key:
-            raise RuntimeError("Set ANTHROPIC_API_KEY")
+            raise RuntimeError("Set ANTHROPIC_API_KEY (or put it in a .env file — see .env.example)")
         self.max_tokens = max_tokens
+        self.effort = effort or os.environ.get("AGENT_EFFORT")  # low | medium | high | xhigh | max
 
     @staticmethod
     def _convert(messages: list[dict]) -> list[dict]:
@@ -67,6 +78,9 @@ class AnthropicClient:
             if m["role"] == "user":
                 out.append({"role": "user", "content": m["content"]})
             elif m["role"] == "assistant":
+                if m.get("raw"):  # replay the model's own blocks unchanged (keeps thinking blocks valid)
+                    out.append({"role": "assistant", "content": m["raw"]})
+                    continue
                 blocks = []
                 if m.get("content"):
                     blocks.append({"type": "text", "text": m["content"]})
@@ -86,13 +100,25 @@ class AnthropicClient:
             "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["parameters"]} for t in tools],
         }
         headers = {"x-api-key": self.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
-        d = _post("https://api.anthropic.com/v1/messages", headers, body)
-        resp = LLMResponse(input_tokens=d["usage"]["input_tokens"], output_tokens=d["usage"]["output_tokens"])
+        if self.model in FALLBACK_MODELS:
+            # If a safety classifier declines, let the API retry on a fallback model instead of stopping.
+            body["fallbacks"] = "default"
+            headers["anthropic-beta"] = "server-side-fallback-2026-07-01"
+        if self.effort:
+            body["output_config"] = {"effort": self.effort}
+        d = _post(self.URL, headers, body)
+        if d.get("stop_reason") == "refusal":
+            category = (d.get("stop_details") or {}).get("category")
+            raise RuntimeError(f"Model declined the request (refusal, category={category})")
+        resp = LLMResponse(input_tokens=d["usage"]["input_tokens"], output_tokens=d["usage"]["output_tokens"],
+                           raw=d["content"])
         for b in d["content"]:
             if b["type"] == "text":
                 resp.text += b["text"]
             elif b["type"] == "tool_use":
                 resp.tool_calls.append(ToolCall(b["id"], b["name"], b["input"]))
+        if d.get("stop_reason") == "max_tokens" and not resp.tool_calls:
+            resp.text += "\n[response cut off at max_tokens]"
         return resp
 
 
@@ -152,9 +178,26 @@ class ScriptedClient:
         return self.script.pop(0) if self.script else LLMResponse(text="Done.")
 
 
-def make_client(provider: str, model: str | None):
+def load_dotenv(*paths: Path) -> None:
+    """Tiny .env reader (KEY=value lines). Never overrides variables that are already set."""
+    paths = paths or (Path.cwd() / ".env", Path(__file__).resolve().parents[1] / ".env")
+    for p in paths:
+        if not p.is_file():
+            continue
+        for line in p.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.removeprefix("export ").split("=", 1)
+            value = value.strip().strip("'\"")
+            if value:
+                os.environ.setdefault(key.strip(), value)
+
+
+def make_client(provider: str, model: str | None, effort: str | None = None):
+    load_dotenv()
     if provider == "anthropic":
-        return AnthropicClient(model or os.environ.get("AGENT_MODEL", "claude-sonnet-4-5"))
+        return AnthropicClient(model or os.environ.get("AGENT_MODEL", "claude-opus-5-5"), effort=effort)
     if provider == "openai":
         return OpenAICompatClient(model or os.environ.get("AGENT_MODEL", "gpt-4o-mini"))
     raise ValueError(f"Unknown provider: {provider}")

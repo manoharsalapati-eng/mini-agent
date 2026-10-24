@@ -1,0 +1,47 @@
+# Runs the 5-bug eval against a real model. Manual only, because it costs API credits.
+# Setup: repo Settings -> Secrets and variables -> Actions -> New secret ANTHROPIC_API_KEY
+# (or OPENAI_API_KEY + OPENAI_BASE_URL for --provider openai). Then Actions -> eval -> Run workflow.
+name: eval
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: "anthropic or openai"
+        default: "anthropic"
+      model:
+        description: "Model name (blank = default)"
+        default: ""
+      trials:
+        description: "Trials per bug"
+        default: "1"
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run eval
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          PROVIDER: ${{ inputs.provider }}
+          MODEL: ${{ inputs.model }}
+          TRIALS: ${{ inputs.trials }}
+        run: |
+          args=(--provider "$PROVIDER" --trials "$TRIALS")
+          if [ -n "$MODEL" ]; then args+=(--model "$MODEL"); fi
+          python eval/run_eval.py "${args[@]}"
+          cat eval/results.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results
+          path: |
+            eval/results.md
+            eval/results.json
+            eval/logs/

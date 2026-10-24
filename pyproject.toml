@@ -1,0 +1,18 @@
+[project]
+name = "mini-agent"
+version = "0.1.0"
+description = "A command-line coding agent harness in zero-dependency Python"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+mini-agent = "harness.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["harness"]

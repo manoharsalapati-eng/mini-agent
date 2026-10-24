@@ -126,13 +126,14 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--provider", default="anthropic", choices=["anthropic", "openai"])
     ap.add_argument("--model")
+    ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     ap.add_argument("--max-steps", type=int, default=25)
     ap.add_argument("--trials", type=int, default=1)
     ap.add_argument("--only", help="Run one bug id")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
 
-    client = make_client(a.provider, a.model)
+    client = make_client(a.provider, a.model, a.effort)
     bugs = [b for b in BUGS if not a.only or b["id"] == a.only]
     results = []
     for trial in range(1, a.trials + 1):

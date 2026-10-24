@@ -44,6 +44,10 @@ class Memory:
     def compact_if_needed(self) -> str | None:
         if self.tokens() <= self.budget:
             return None
+        # Compacting edits history, and provider thinking blocks are bound to the exact history that
+        # produced them. Drop the raw blocks so each client rebuilds plain text + tool calls instead.
+        for m in self.messages:
+            m.pop("raw", None)
         # Stage 1: clip tool results outside the recent window
         cutoff = max(0, len(self.messages) - self.keep_recent)
         for m in self.messages[:cutoff]:

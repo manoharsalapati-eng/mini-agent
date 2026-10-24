@@ -1,13 +1,18 @@
 """Offline tests for the harness — no API key needed (uses ScriptedClient)."""
+import io
+import os
 import shutil
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from harness import demo, llm  # noqa: E402
 from harness.agent import Agent  # noqa: E402
 from harness.guardrails import Approver, GuardrailError, check_command, safe_path  # noqa: E402
 from harness.llm import AnthropicClient, LLMResponse, OpenAICompatClient, ScriptedClient, ToolCall  # noqa: E402
@@ -158,6 +163,16 @@ class TestMemory(unittest.TestCase):
         ids_answered = {r["id"] for x in m.messages if x["role"] == "tool" for r in x["results"]}
         self.assertEqual(ids_called, ids_answered)  # no orphaned tool calls/results
 
+    def test_compaction_drops_raw_provider_blocks(self):
+        # Thinking blocks are bound to the exact history; after an edit they must not be replayed.
+        m = Memory(budget_tokens=4000, keep_recent=4)
+        m.messages = self._history(10)
+        for x in m.messages:
+            if x["role"] == "assistant":
+                x["raw"] = [{"type": "thinking", "thinking": "", "signature": "sig"}]
+        m.compact_if_needed()
+        self.assertFalse(any("raw" in x for x in m.messages))
+
 
 class TestWireFormats(unittest.TestCase):
     msgs = [{"role": "user", "content": "hi"},
@@ -169,10 +184,56 @@ class TestWireFormats(unittest.TestCase):
         self.assertEqual([m["role"] for m in out], ["user", "assistant", "user"])
         self.assertEqual(out[2]["content"][0]["type"], "tool_result")
 
+    def test_anthropic_replays_raw_blocks(self):
+        raw = [{"type": "thinking", "thinking": "", "signature": "sig"},
+               {"type": "tool_use", "id": "1", "name": "list_files", "input": {}}]
+        msgs = [dict(m) for m in self.msgs]
+        msgs[1]["raw"] = raw
+        self.assertEqual(AnthropicClient._convert(msgs)[1]["content"], raw)
+
+    def test_anthropic_response_parsing(self):
+        reply = {"content": [{"type": "thinking", "thinking": "", "signature": "s"},
+                             {"type": "text", "text": "Reading."},
+                             {"type": "tool_use", "id": "t1", "name": "read_file", "input": {"path": "a.py"}}],
+                 "usage": {"input_tokens": 10, "output_tokens": 5}, "stop_reason": "tool_use"}
+        client = AnthropicClient("claude-opus-5-5", api_key="k")
+        with mock.patch.object(llm, "_post", return_value=reply) as post:
+            r = client.complete("sys", self.msgs, [])
+        body = post.call_args[0][2]
+        self.assertEqual(body["fallbacks"], "default")
+        self.assertNotIn("temperature", body)
+        self.assertEqual((r.text, r.tool_calls[0].args, r.raw), ("Reading.", {"path": "a.py"}, reply["content"]))
+
+    def test_anthropic_refusal_raises(self):
+        reply = {"content": [], "usage": {"input_tokens": 1, "output_tokens": 0},
+                 "stop_reason": "refusal", "stop_details": {"category": "cyber"}}
+        with mock.patch.object(llm, "_post", return_value=reply):
+            with self.assertRaisesRegex(RuntimeError, "cyber"):
+                AnthropicClient("m", api_key="k").complete("sys", self.msgs, [])
+
     def test_openai(self):
         out = OpenAICompatClient._convert("sys", self.msgs)
         self.assertEqual([m["role"] for m in out], ["system", "user", "assistant", "tool"])
         self.assertEqual(out[3]["tool_call_id"], "1")
+
+
+class TestDotenvAndDemo(unittest.TestCase):
+    def test_load_dotenv_does_not_override(self):
+        env = Path(tempfile.mkdtemp()) / ".env"
+        env.write_text("# comment\nMINI_AGENT_A='from-file'\nexport MINI_AGENT_B=2\nMINI_AGENT_EMPTY=\n")
+        with mock.patch.dict(os.environ, {"MINI_AGENT_B": "already-set"}):
+            llm.load_dotenv(env)
+            self.assertEqual(os.environ["MINI_AGENT_A"], "from-file")
+            self.assertEqual(os.environ["MINI_AGENT_B"], "already-set")
+            self.assertNotIn("MINI_AGENT_EMPTY", os.environ)
+        os.environ.pop("MINI_AGENT_A", None)
+
+    def test_offline_demo_fixes_the_bug(self):
+        with redirect_stdout(io.StringIO()) as out:
+            code = demo.run_demo(Approver(auto_approve=True), verbose=True)
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("Ran 3 tests", out.getvalue())
+        self.assertIn("OK", out.getvalue())
 
 
 class TestEvalScorer(unittest.TestCase):
@@ -186,6 +247,26 @@ class TestEvalScorer(unittest.TestCase):
         ])
         r = run_eval.eval_bug(run_eval.BUGS[0], client, 5, verbose=False, log_root=Path(tempfile.mkdtemp()))
         self.assertTrue(r["fixed"], r)
+
+    def test_every_bug_is_fixable(self):
+        # Reference fixes: proves each seeded bug can be fixed without touching tests (a 5/5 "oracle").
+        fixes = {
+            "stats-average": ("shopkit/stats.py", "(len(values) - 1)", "len(values)"),
+            "text-palindrome": ("shopkit/text.py", "return s == s[::-1]",
+                                "s = [c.lower() for c in s if c.isalnum()]\n    return s == s[::-1]"),
+            "cart-discount": ("shopkit/cart.py", "(1 - discount_percent)", "(1 - discount_percent / 100)"),
+            "dates-leap-year": ("shopkit/dates.py", "return year % 4 == 0",
+                                "return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)"),
+            "inventory-shared-state": ("shopkit/inventory.py", "items=[]):\n        self.items = items",
+                                       "items=None):\n        self.items = list(items or [])"),
+        }
+        self.assertEqual(set(fixes), {b["id"] for b in run_eval.BUGS})
+        for bug in run_eval.BUGS:
+            path, old, new = fixes[bug["id"]]
+            client = ScriptedClient([LLMResponse(tool_calls=[call("edit_file", path=path, old_str=old, new_str=new)]),
+                                     LLMResponse(text="fixed")])
+            r = run_eval.eval_bug(bug, client, 5, verbose=False, log_root=Path(tempfile.mkdtemp()))
+            self.assertTrue(r["fixed"], r)
 
     def test_cheating_does_not_count(self):
         client = ScriptedClient([

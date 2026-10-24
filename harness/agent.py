@@ -79,8 +79,10 @@ class Agent:
             self._log("model", step=step, text=resp.text,
                       tool_calls=[tc.__dict__ for tc in resp.tool_calls],
                       usage=[resp.input_tokens, resp.output_tokens])
-            self.memory.add({"role": "assistant", "content": resp.text,
-                             "tool_calls": [tc.__dict__ for tc in resp.tool_calls]})
+            msg = {"role": "assistant", "content": resp.text, "tool_calls": [tc.__dict__ for tc in resp.tool_calls]}
+            if resp.raw:
+                msg["raw"] = resp.raw
+            self.memory.add(msg)
             if resp.text:
                 self._print("dim", f"\n[step {step}] {resp.text.strip()}")
 
