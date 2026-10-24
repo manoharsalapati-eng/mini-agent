@@ -1,0 +1,1 @@
+"""Minimal coding-agent harness."""
