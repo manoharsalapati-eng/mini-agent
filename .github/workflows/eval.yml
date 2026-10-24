@@ -103,6 +103,13 @@ jobs:
           grep -iE "^(HTTP|location|content-type|content-length|x-ratelimit)" /tmp/h2 || true
           head -c 600 /tmp/chat.json; echo
           echo "::endgroup::"
+          echo "::group::legacy endpoint (models.inference.ai.azure.com)"
+          curl -sS -m 60 -D /tmp/h3 -o /tmp/chat2.json -X POST https://models.inference.ai.azure.com/chat/completions \
+            -H "Authorization: Bearer $GITHUB_TOKEN" -H "Content-Type: application/json" \
+            -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "Reply with OK"}]}' || true
+          grep -iE "^(HTTP|location|content-type|x-ratelimit)" /tmp/h3 || true
+          head -c 600 /tmp/chat2.json; echo
+          echo "::endgroup::"
 
       - name: Run eval
         run: |
