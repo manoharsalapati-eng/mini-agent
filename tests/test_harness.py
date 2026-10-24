@@ -211,6 +211,18 @@ class TestWireFormats(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "cyber"):
                 AnthropicClient("m", api_key="k").complete("sys", self.msgs, [])
 
+    def test_rate_limit_waits_for_retry_after(self):
+        import urllib.error
+        from email.message import Message
+        headers = Message()
+        headers["Retry-After"] = "7"
+        err = urllib.error.HTTPError("u", 429, "Too Many Requests", headers, io.BytesIO(b"slow down"))
+        ok = mock.MagicMock()
+        ok.__enter__.return_value.read.return_value = b'{"ok": true}'
+        with mock.patch("urllib.request.urlopen", side_effect=[err, ok]), mock.patch("time.sleep") as sleep:
+            self.assertEqual(llm._post("https://example.invalid/v1", {}, {}), {"ok": True})
+        sleep.assert_called_once_with(7.0)
+
     def test_openai(self):
         out = OpenAICompatClient._convert("sys", self.msgs)
         self.assertEqual([m["role"] for m in out], ["system", "user", "assistant", "tool"])
@@ -267,6 +279,14 @@ class TestEvalScorer(unittest.TestCase):
                                      LLMResponse(text="fixed")])
             r = run_eval.eval_bug(bug, client, 5, verbose=False, log_root=Path(tempfile.mkdtemp()))
             self.assertTrue(r["fixed"], r)
+
+    def test_summary_table(self):
+        d = Path(tempfile.mkdtemp())
+        rows = [{"fixed": True, "steps": 4, "tokens": 1000}, {"fixed": False, "steps": 6, "tokens": 3000}]
+        meta = {"model": "model-a", "trials": 1, "date": "2026-10-24 10:00"}
+        (d / "a.json").write_text(__import__("json").dumps({"meta": meta, "results": rows}))
+        table = run_eval.write_summary(d)
+        self.assertIn("| model-a | **1/2** (50%) | 5.0 | 2,000 | 1 | 2026-10-24 |", table)
 
     def test_cheating_does_not_count(self):
         client = ScriptedClient([

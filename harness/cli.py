@@ -23,6 +23,8 @@ def main(argv=None) -> None:
     ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
                     help="Anthropic effort level (or set AGENT_EFFORT); default is the model's own")
     ap.add_argument("--max-steps", type=int, default=25)
+    ap.add_argument("--budget-tokens", type=int, default=60_000,
+                    help="Compact history above this many tokens (lower it for small-context models)")
     ap.add_argument("--yes", action="store_true", help="Auto-approve writes/commands (blocklist still applies)")
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--demo", action="store_true", help="Offline scripted demo on a copy of eval/sample_repo")
@@ -41,7 +43,7 @@ def main(argv=None) -> None:
     except RuntimeError as e:
         ap.error(str(e))
     agent = Agent(client, root, Approver(auto_approve=a.yes),
-                  max_steps=a.max_steps, verbose=not a.quiet)
+                  max_steps=a.max_steps, verbose=not a.quiet, budget_tokens=a.budget_tokens)
     print(f"Agent ready in {root}  (log: {agent.log_path.relative_to(root)})")
 
     if a.prompt:

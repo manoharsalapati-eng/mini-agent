@@ -87,9 +87,9 @@ SUMMARY_PROMPT = ("Summarise this coding-agent conversation so work can continue
                   "Be concise (under 300 words).")
 
 
-def make_model_summarizer(client):
+def make_model_summarizer(client, max_chars: int = 60_000):
     def summarize(msgs: list[dict]) -> str:
-        transcript = json.dumps(msgs)[:60_000]
+        transcript = json.dumps(msgs)[:max_chars]
         r = client.complete(SUMMARY_PROMPT, [{"role": "user", "content": transcript}], [])
         return r.text or _fallback_summary(msgs)
     return summarize

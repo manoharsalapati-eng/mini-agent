@@ -1,42 +1,112 @@
-# Runs the 5-bug eval against a real model. Manual only, because it costs API credits.
-# Setup: repo Settings -> Secrets and variables -> Actions -> New secret ANTHROPIC_API_KEY
-# (or OPENAI_API_KEY + OPENAI_BASE_URL for --provider openai). Then Actions -> eval -> Run workflow.
+# Runs the 5-bug eval against a real model and commits the results to eval/results/.
+#
+#   provider=github     free GitHub Models, authenticated with the workflow's own token (no secret needed)
+#   provider=anthropic  needs repo secret ANTHROPIC_API_KEY
+#   provider=openai     needs repo secrets OPENAI_API_KEY and OPENAI_BASE_URL
+#
+# Actions -> eval -> Run workflow.
 name: eval
 
 on:
   workflow_dispatch:
     inputs:
       provider:
-        description: "anthropic or openai"
-        default: "anthropic"
+        description: "Model provider"
+        type: choice
+        options: [github, anthropic, openai]
+        default: github
       model:
-        description: "Model name (blank = default)"
+        description: "Model name (blank = openai/gpt-4.1-mini on GitHub Models, claude-opus-5-5 on Anthropic)"
         default: ""
       trials:
         description: "Trials per bug"
         default: "1"
+      record_demo:
+        description: "Also record a real run on the cart bug to docs/demo_run.ansi"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  models: read
+
+concurrency:
+  group: eval
+  cancel-in-progress: false
 
 jobs:
   eval:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PROVIDER: ${{ inputs.provider }}
+      MODEL: ${{ inputs.model }}
+      TRIALS: ${{ inputs.trials }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Run eval
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
-          PROVIDER: ${{ inputs.provider }}
-          MODEL: ${{ inputs.model }}
-          TRIALS: ${{ inputs.trials }}
+
+      - name: Configure provider
         run: |
-          args=(--provider "$PROVIDER" --trials "$TRIALS")
-          if [ -n "$MODEL" ]; then args+=(--model "$MODEL"); fi
-          python eval/run_eval.py "${args[@]}"
+          args=(--trials "$TRIALS")
+          if [ "$PROVIDER" = github ]; then
+            # GitHub Models is OpenAI-compatible; the free tier caps requests at ~8k input tokens,
+            # so keep the agent's memory budget well under that.
+            MODEL="${MODEL:-openai/gpt-4.1-mini}"
+            {
+              echo "OPENAI_API_KEY=$GITHUB_TOKEN"
+              echo "OPENAI_BASE_URL=https://models.github.ai/inference"
+            } >> "$GITHUB_ENV"
+            args+=(--provider openai --model "$MODEL" --budget-tokens 5000 --label "$MODEL (GitHub Models)")
+          elif [ "$PROVIDER" = openai ]; then
+            {
+              echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
+              echo "OPENAI_BASE_URL=${{ secrets.OPENAI_BASE_URL }}"
+            } >> "$GITHUB_ENV"
+            args+=(--provider openai)
+            if [ -n "$MODEL" ]; then args+=(--model "$MODEL"); fi
+          else
+            args+=(--provider anthropic)
+            if [ -n "$MODEL" ]; then args+=(--model "$MODEL"); fi
+          fi
+          echo "EVAL_ARGS=${args[*]@Q}" >> "$GITHUB_ENV"
+
+      - name: List available GitHub Models
+        if: inputs.provider == 'github'
+        continue-on-error: true
+        run: |
+          curl -sf https://models.github.ai/catalog/models -H "Authorization: Bearer $GITHUB_TOKEN" \
+            | python -c "import sys, json; [print(m['id'], '|', m.get('rate_limit_tier'), '|', ','.join(m.get('capabilities', []))) for m in json.load(sys.stdin)]"
+
+      - name: Run eval
+        run: |
+          eval "python eval/run_eval.py $EVAL_ARGS"
           cat eval/results.md >> "$GITHUB_STEP_SUMMARY"
+          echo -e "\n## All models\n" >> "$GITHUB_STEP_SUMMARY"
+          cat eval/results/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record a demo run (cart bug)
+        if: inputs.record_demo
+        run: |
+          cp -r eval/sample_repo /tmp/shopkit
+          yes y | head -n 200 > /tmp/answers || true
+          eval "set -- $EVAL_ARGS"
+          # keep only the flags the CLI understands
+          cli=()
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              --provider|--model|--budget-tokens) cli+=("$1" "$2"); shift 2 ;;
+              *) shift ;;
+            esac
+          done
+          python -m harness /tmp/shopkit "${cli[@]}" \
+            -p "Bug: Cart.total(10) is supposed to apply a 10% discount but returns a negative number. Find the cause, fix it, and run the tests to confirm." \
+            < /tmp/answers | tee docs/demo_run.ansi
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -44,4 +114,17 @@ jobs:
           path: |
             eval/results.md
             eval/results.json
+            eval/results/
             eval/logs/
+            docs/demo_run.ansi
+          if-no-files-found: ignore
+
+      - name: Commit results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add eval/results eval/results.md eval/results.json
+          if [ -f docs/demo_run.ansi ]; then git add docs/demo_run.ansi; fi
+          git diff --cached --quiet && exit 0
+          git commit -m "eval: results for ${MODEL:-$PROVIDER} [skip ci]"
+          git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME"

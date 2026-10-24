@@ -34,7 +34,7 @@ class LLMResponse:
     raw: list | None = None  # provider content blocks to replay as-is (see module docstring)
 
 
-def _post(url: str, headers: dict, body: dict, retries: int = 4) -> dict:
+def _post(url: str, headers: dict, body: dict, retries: int = 5) -> dict:
     data = json.dumps(body).encode()
     for attempt in range(retries + 1):
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
@@ -44,7 +44,7 @@ def _post(url: str, headers: dict, body: dict, retries: int = 4) -> dict:
         except urllib.error.HTTPError as e:
             msg = e.read().decode(errors="replace")[:500]
             if e.code in (429, 500, 502, 503, 529) and attempt < retries:
-                time.sleep(2 ** attempt)  # exponential backoff
+                time.sleep(_retry_delay(e, attempt))
                 continue
             raise RuntimeError(f"API error {e.code}: {msg}") from None
         except urllib.error.URLError as e:
@@ -53,6 +53,15 @@ def _post(url: str, headers: dict, body: dict, retries: int = 4) -> dict:
                 continue
             raise RuntimeError(f"Network error: {e.reason}") from None
     raise RuntimeError("unreachable")
+
+
+def _retry_delay(e: urllib.error.HTTPError, attempt: int, cap: float = 60.0) -> float:
+    """Exponential backoff, but wait at least as long as the server's Retry-After asks (rate limits)."""
+    try:
+        retry_after = float(e.headers.get("retry-after", 0)) if e.headers else 0.0
+    except ValueError:
+        retry_after = 0.0
+    return min(cap, max(2 ** attempt, retry_after))
 
 
 # Models that accept the server-side `fallbacks` parameter on the Claude API.
@@ -97,8 +106,10 @@ class AnthropicClient:
         body = {
             "model": self.model, "max_tokens": self.max_tokens, "system": system,
             "messages": self._convert(messages),
-            "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["parameters"]} for t in tools],
         }
+        if tools:
+            body["tools"] = [{"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
+                             for t in tools]
         headers = {"x-api-key": self.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
         if self.model in FALLBACK_MODELS:
             # If a safety classifier declines, let the API retry on a fallback model instead of stopping.
@@ -149,8 +160,9 @@ class OpenAICompatClient:
         return out
 
     def complete(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
-        body = {"model": self.model, "messages": self._convert(system, messages),
-                "tools": [{"type": "function", "function": t} for t in tools]}
+        body = {"model": self.model, "messages": self._convert(system, messages)}
+        if tools:  # several OpenAI-compatible APIs reject an empty tools list
+            body["tools"] = [{"type": "function", "function": t} for t in tools]
         headers = {"Authorization": f"Bearer {self.api_key}", "content-type": "application/json"}
         d = _post(f"{self.base_url}/chat/completions", headers, body)
         msg = d["choices"][0]["message"]

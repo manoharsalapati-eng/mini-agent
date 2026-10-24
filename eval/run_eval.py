@@ -30,6 +30,7 @@ from harness.guardrails import Approver  # noqa: E402
 from harness.llm import make_client  # noqa: E402
 
 SAMPLE = ROOT / "sample_repo"
+RESULTS_DIR = ROOT / "results"
 
 # Written like real bug reports: symptom only, no file names or fixes.
 BUGS = [
@@ -63,7 +64,8 @@ def run_unittest(repo: Path, module: str | None = None) -> tuple[bool, set[str]]
     return r.returncode == 0, failing
 
 
-def eval_bug(bug: dict, client, max_steps: int, verbose: bool, log_root: Path = ROOT / "logs") -> dict:
+def eval_bug(bug: dict, client, max_steps: int, verbose: bool, log_root: Path = ROOT / "logs",
+             budget_tokens: int = 60_000) -> dict:
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp) / "repo"
         shutil.copytree(SAMPLE, repo, ignore=shutil.ignore_patterns("__pycache__", ".agent_logs"))
@@ -71,7 +73,7 @@ def eval_bug(bug: dict, client, max_steps: int, verbose: bool, log_root: Path = 
         _, failing_before = run_unittest(repo)
 
         agent = Agent(client, repo, Approver(auto_approve=True), max_steps=max_steps, verbose=verbose,
-                      log_dir=log_root / bug["id"])
+                      log_dir=log_root / bug["id"], budget_tokens=budget_tokens)
         t0 = time.time()
         try:
             summary, stats = agent.run(TASK_TEMPLATE.format(report=bug["report"]))
@@ -122,13 +124,32 @@ def write_report(results: list[dict], meta: dict, out: Path) -> str:
     return text
 
 
+def write_summary(results_dir: Path) -> str:
+    """One row per model from every results/*.json — the table that goes in the README."""
+    lines = ["| Model | Fixed | Mean steps | Mean tokens | Trials | Date |", "|---|---|---|---|---|---|"]
+    for f in sorted(results_dir.glob("*.json")):
+        d = json.loads(f.read_text())
+        rs, meta = d["results"], d["meta"]
+        fixed, n = sum(r["fixed"] for r in rs), len(rs)
+        steps = [r["steps"] for r in rs if r["steps"]]
+        tokens = [r["tokens"] for r in rs if r["tokens"]]
+        mean = lambda xs, fmt: format(sum(xs) / len(xs), fmt) if xs else "–"  # noqa: E731
+        lines.append(f"| {meta['model']} | **{fixed}/{n}** ({100 * fixed / n:.0f}%) | {mean(steps, '.1f')} | "
+                     f"{mean(tokens, ',.0f')} | {meta['trials']} | {meta['date'][:10]} |")
+    text = "\n".join(lines) + "\n"
+    (results_dir / "summary.md").write_text(text)
+    return text
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--provider", default="anthropic", choices=["anthropic", "openai"])
     ap.add_argument("--model")
+    ap.add_argument("--label", help="Name to show in the results table (default: provider/model)")
     ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     ap.add_argument("--max-steps", type=int, default=25)
     ap.add_argument("--trials", type=int, default=1)
+    ap.add_argument("--budget-tokens", type=int, default=60_000, help="Memory budget (lower for small-context models)")
     ap.add_argument("--only", help="Run one bug id")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
@@ -139,15 +160,23 @@ def main() -> None:
     for trial in range(1, a.trials + 1):
         for bug in bugs:
             print(f"[trial {trial}] {bug['id']} …", end=" ", flush=True)
-            r = eval_bug(bug, client, a.max_steps, a.verbose)
+            r = eval_bug(bug, client, a.max_steps, a.verbose, budget_tokens=a.budget_tokens)
             r["trial"] = trial
             results.append(r)
             print("FIXED" if r["fixed"] else "not fixed", f"({r['steps']} steps, {r['seconds']}s)")
 
-    meta = {"model": f"{a.provider}/{client.model}", "trials": a.trials, "max_steps": a.max_steps,
+    meta = {"model": a.label or f"{a.provider}/{client.model}", "trials": a.trials, "max_steps": a.max_steps,
             "date": time.strftime("%Y-%m-%d %H:%M")}
-    (ROOT / "results.json").write_text(json.dumps({"meta": meta, "results": results}, indent=2))
+    payload = json.dumps({"meta": meta, "results": results}, indent=2)
+    (ROOT / "results.json").write_text(payload)
     print("\n" + write_report(results, meta, ROOT / "results.md"))
+    # Keep one file per model so several models can be compared side by side.
+    if not a.only:
+        RESULTS_DIR.mkdir(exist_ok=True)
+        slug = "".join(c if c.isalnum() or c in "-." else "_" for c in meta["model"])
+        (RESULTS_DIR / f"{slug}.json").write_text(payload)
+        write_report(results, meta, RESULTS_DIR / f"{slug}.md")
+        print(write_summary(RESULTS_DIR))
 
 
 if __name__ == "__main__":

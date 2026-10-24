@@ -44,7 +44,7 @@ class Agent:
         self.max_steps = max_steps
         self.verbose = verbose
         self.system = SYSTEM_PROMPT + load_project_notes(self.root)
-        self.memory = Memory(budget_tokens=budget_tokens, summarizer=make_model_summarizer(client))
+        self.memory = Memory(budget_tokens=budget_tokens, summarizer=make_model_summarizer(client, max_chars=min(60_000, budget_tokens * 4)))
         log_dir = log_dir or self.root / ".agent_logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = log_dir / f"run_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
